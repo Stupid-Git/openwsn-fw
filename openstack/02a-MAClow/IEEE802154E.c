@@ -70,6 +70,7 @@ bool     isValidJoin(OpenQueueEntry_t* eb, ieee802154_header_iht *parsedHeader);
 bool     ieee154e_processIEs(OpenQueueEntry_t* pkt, uint16_t* lenIE);
 // ASN handling
 void     incrementAsnOffset(void);
+void     ieee154e_resetAsn(void);
 void     ieee154e_syncSlotOffset(void);
 void     asnStoreFromEB(uint8_t* asn);
 void     joinPriorityStoreFromEB(uint8_t jp);
@@ -118,6 +119,8 @@ void ieee154e_init() {
    ieee154e_vars.isAckEnabled      = TRUE;
    ieee154e_vars.isSecurityEnabled = FALSE;
    ieee154e_vars.slotDuration      = TsSlotDuration;
+   ieee154e_vars.numOfSleepSlots   = 1;
+   
    // default hopping template
    memcpy(
        &(ieee154e_vars.chTemplate[0]),
@@ -191,8 +194,7 @@ void isr_ieee154e_newSlot() {
    if (ieee154e_vars.isSync==FALSE) {
       if (idmanager_getIsDAGroot()==TRUE) {
          changeIsSync(TRUE);
-         incrementAsnOffset();
-         ieee154e_syncSlotOffset();
+         ieee154e_resetAsn();
          ieee154e_vars.nextActiveSlotOffset = schedule_getNextActiveSlotOffset();
       } else {
          activity_synchronize_newSlot();
@@ -844,22 +846,27 @@ port_INLINE void activity_ti1ORri1() {
    
    // desynchronize if needed
    if (idmanager_getIsDAGroot()==FALSE) {
-      ieee154e_vars.deSyncTimeout--;
-      if (ieee154e_vars.deSyncTimeout==0) {
-         // declare myself desynchronized
-         changeIsSync(FALSE);
-        
-         // log the error
-         openserial_printError(COMPONENT_IEEE802154E,ERR_DESYNCHRONIZED,
-                               (errorparameter_t)ieee154e_vars.slotOffset,
-                               (errorparameter_t)0);
+      if(ieee154e_vars.deSyncTimeout > ieee154e_vars.numOfSleepSlots){
+         ieee154e_vars.deSyncTimeout -= ieee154e_vars.numOfSleepSlots;
+      }
+      else{
+            // Reset sleep slots
+            ieee154e_vars.numOfSleepSlots = 1;
             
-         // update the statistics
-         ieee154e_stats.numDeSync++;
-            
-         // abort
-         endSlot();
-         return;
+            // declare myself desynchronized
+            changeIsSync(FALSE);
+           
+            // log the error
+            openserial_printError(COMPONENT_IEEE802154E,ERR_DESYNCHRONIZED,
+                                  (errorparameter_t)ieee154e_vars.slotOffset,
+                                  (errorparameter_t)0);
+               
+            // update the statistics
+            ieee154e_stats.numDeSync++;
+               
+            // abort
+            endSlot();
+            return;
       }
    }
    
@@ -873,6 +880,9 @@ port_INLINE void activity_ti1ORri1() {
       endSlot();
       return;
    }
+
+   // Reset sleep slots
+   ieee154e_vars.numOfSleepSlots = 1;
    
    if (ieee154e_vars.slotOffset==ieee154e_vars.nextActiveSlotOffset) {
       // this is the next active slot
@@ -882,6 +892,20 @@ port_INLINE void activity_ti1ORri1() {
       
       // find the next one
       ieee154e_vars.nextActiveSlotOffset = schedule_getNextActiveSlotOffset();
+      if (idmanager_getIsSlotSkip() && idmanager_getIsDAGroot()==FALSE) {
+          if (ieee154e_vars.nextActiveSlotOffset>ieee154e_vars.slotOffset) {
+               ieee154e_vars.numOfSleepSlots = ieee154e_vars.nextActiveSlotOffset-ieee154e_vars.slotOffset;
+          } else {
+               ieee154e_vars.numOfSleepSlots = schedule_getFrameLength()+ieee154e_vars.nextActiveSlotOffset-ieee154e_vars.slotOffset; 
+          }
+          
+          radio_setTimerPeriod(TsSlotDuration*(ieee154e_vars.numOfSleepSlots));
+           
+          //increase ASN by numOfSleepSlots-1 slots as at this slot is already incremented by 1
+          for (i=0;i<ieee154e_vars.numOfSleepSlots-1;i++){
+             incrementAsnOffset();
+          }
+      }       
    } else {
       // this is NOT the next active slot, abort
       // stop using serial
@@ -929,7 +953,7 @@ port_INLINE void activity_ti1ORri1() {
                //copy synch IE  -- should be Little endian???
                // fill in the ASN field of the EB
                ieee154e_getAsn(sync_IE.asn);
-               sync_IE.join_priority = (neighbors_getMyDAGrank()/MINHOPRANKINCREASE)-1; //poipoi -- use dagrank(rank)-1
+               sync_IE.join_priority = (icmpv6rpl_getMyDAGrank()/MINHOPRANKINCREASE)-1; //poipoi -- use dagrank(rank)-1
                memcpy(ieee154e_vars.dataToSend->l2_ASNpayload,&sync_IE,sizeof(sync_IE_ht));
             }
             // record that I attempt to transmit this packet
@@ -957,7 +981,8 @@ port_INLINE void activity_ti1ORri1() {
          openserial_startInput();
          //this is to emulate a set of serial input slots without having the slotted structure.
 
-         radio_setTimerPeriod(ieee154e_vars.slotDuration*(NUMSERIALRX));
+         //skip the serial rx slots
+         ieee154e_vars.numOfSleepSlots = NUMSERIALRX;
          
          //increase ASN by NUMSERIALRX-1 slots as at this slot is already incremented by 1
          for (i=0;i<NUMSERIALRX-1;i++){
@@ -967,6 +992,22 @@ port_INLINE void activity_ti1ORri1() {
             // find the next one
             ieee154e_vars.nextActiveSlotOffset = schedule_getNextActiveSlotOffset();
          }
+         // possibly skip additional slots if enabled
+         if (idmanager_getIsSlotSkip() && idmanager_getIsDAGroot()==FALSE) {
+             if (ieee154e_vars.nextActiveSlotOffset>ieee154e_vars.slotOffset) {
+                 ieee154e_vars.numOfSleepSlots = ieee154e_vars.nextActiveSlotOffset-ieee154e_vars.slotOffset+NUMSERIALRX-1;
+             } else {
+                 ieee154e_vars.numOfSleepSlots = schedule_getFrameLength()+ieee154e_vars.nextActiveSlotOffset-ieee154e_vars.slotOffset+NUMSERIALRX-1; 
+             }
+              
+             //only increase ASN by numOfSleepSlots-NUMSERIALRX
+             for (i=0;i<ieee154e_vars.numOfSleepSlots-NUMSERIALRX;i++){
+                incrementAsnOffset();
+             }
+         }
+         // set the timer based on calcualted number of slots to skip
+         radio_setTimerPeriod(TsSlotDuration*(ieee154e_vars.numOfSleepSlots));
+         
 #ifdef ADAPTIVE_SYNC
          // deal with the case when schedule multi slots
          adaptive_sync_countCompensationTimeout_compoundSlots(NUMSERIALRX-1);
@@ -1312,7 +1353,7 @@ port_INLINE void activity_ti9(PORT_RADIOTIMER_WIDTH capturedTime) {
          
       if (
             idmanager_getIsDAGroot()==FALSE &&
-            neighbors_isPreferredParent(&(ieee154e_vars.ackReceived->l2_nextORpreviousHop))
+            icmpv6rpl_isPreferredParent(&(ieee154e_vars.ackReceived->l2_nextORpreviousHop))
          ) {
          synchronizeAck(ieee802514_header.timeCorrection);
       }
@@ -1540,7 +1581,7 @@ port_INLINE void activity_ri5(PORT_RADIOTIMER_WIDTH capturedTime) {
          radiotimer_schedule(DURATION_rt5);
       } else {
          // synchronize to the received packet iif I'm not a DAGroot and this is my preferred parent
-         if (idmanager_getIsDAGroot()==FALSE && neighbors_isPreferredParent(&(ieee154e_vars.dataReceived->l2_nextORpreviousHop))) {
+         if (idmanager_getIsDAGroot()==FALSE && icmpv6rpl_isPreferredParent(&(ieee154e_vars.dataReceived->l2_nextORpreviousHop))) {
             synchronizePacket(ieee154e_vars.syncCapturedTime);
          }
          // indicate reception to upper layer (no ACK asked)
@@ -1716,7 +1757,7 @@ port_INLINE void activity_ri9(PORT_RADIOTIMER_WIDTH capturedTime) {
    ieee154e_vars.ackToSend = NULL;
    
    // synchronize to the received packet
-   if (idmanager_getIsDAGroot()==FALSE && neighbors_isPreferredParent(&(ieee154e_vars.dataReceived->l2_nextORpreviousHop))) {
+   if (idmanager_getIsDAGroot()==FALSE && icmpv6rpl_isPreferredParent(&(ieee154e_vars.dataReceived->l2_nextORpreviousHop))) {
       synchronizePacket(ieee154e_vars.syncCapturedTime);
    }
    
@@ -1813,6 +1854,16 @@ port_INLINE void incrementAsnOffset() {
       ieee154e_vars.slotOffset  = (ieee154e_vars.slotOffset+1)%frameLength;
    }
    ieee154e_vars.asnOffset   = (ieee154e_vars.asnOffset+1)%16;
+}
+
+port_INLINE void ieee154e_resetAsn(){
+    // reset slotoffset
+    ieee154e_vars.slotOffset     = 0;
+    ieee154e_vars.asnOffset      = 0;
+    // reset asn
+    ieee154e_vars.asn.byte4      = 0;
+    ieee154e_vars.asn.bytes2and3 = 0;
+    ieee154e_vars.asn.bytes0and1 = 0;
 }
 
 //from upper layer that want to send the ASN to compute timing or latency
@@ -2005,7 +2056,7 @@ void synchronizeAck(PORT_SIGNED_INT_WIDTH timeCorrection) {
 
    // resynchronize by applying the new period
    radio_setTimerPeriod(newPeriod);
-   
+
    // reset the de-synchronization timeout
    ieee154e_vars.deSyncTimeout    = DESYNCTIMEOUT;
 #ifdef ADAPTIVE_SYNC
@@ -2071,11 +2122,6 @@ void notif_receive(OpenQueueEntry_t* packetReceived) {
    // associate this packet with the virtual component
    // COMPONENT_IEEE802154E_TO_SIXTOP so sixtop can knows it's for it
    packetReceived->owner          = COMPONENT_IEEE802154E_TO_SIXTOP;
-#ifdef GOLDEN_IMAGE_ROOT
-//   openserial_printInfo(COMPONENT_IEEE802154E,ERR_PACKET_SYNC,
-//                   (errorparameter_t)packetReceived->l2_asn.bytes0and1,
-//                   (errorparameter_t)packetReceived->l2_timeCorrection);
-#endif
    // post RES's Receive task
    scheduler_push_task(task_sixtopNotifReceive,TASKPRIO_SIXTOP_NOTIF_RX);
    // wake up the scheduler

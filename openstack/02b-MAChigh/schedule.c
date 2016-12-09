@@ -5,6 +5,7 @@
 #include "packetfunctions.h"
 #include "sixtop.h"
 #include "idmanager.h"
+#include "sf0.h"
 
 //=========================== variables =======================================
 
@@ -341,6 +342,16 @@ owerror_t schedule_addActiveSlot(
          ) {
             break;
          }
+         if (previousSlotWalker->slotOffset == slotContainer->slotOffset) {
+            // slot is already in schedule
+            openserial_printError(
+               COMPONENT_SCHEDULE,ERR_SCHEDULE_ADDDUPLICATESLOT,
+               (errorparameter_t)slotContainer->slotOffset,
+               (errorparameter_t)0
+            );
+            ENABLE_INTERRUPTS();
+            return E_FAIL;
+         }
          previousSlotWalker                 = nextSlotWalker;
       }
       // insert between previousSlotWalker and nextSlotWalker
@@ -524,6 +535,47 @@ scheduleEntry_t* schedule_getCurrentScheduleEntry(){
     return schedule_vars.currentScheduleEntry;
 }
 
+//=== from otf
+uint8_t schedule_getNumOfSlotsByType(cellType_t type){
+   uint8_t returnVal;
+   scheduleEntry_t* scheduleWalker;
+   
+   INTERRUPT_DECLARATION();
+   DISABLE_INTERRUPTS();
+   
+   returnVal = 0;
+   scheduleWalker = schedule_vars.currentScheduleEntry;
+   do {
+      if(type == scheduleWalker->type){
+          returnVal += 1;
+      }
+      scheduleWalker = scheduleWalker->next;
+   }while(scheduleWalker!=schedule_vars.currentScheduleEntry);
+   
+   ENABLE_INTERRUPTS();
+   
+   return returnVal;
+}
+
+uint8_t schedule_getNumberOfFreeEntries(){
+   uint8_t i; 
+   uint8_t counter;
+   
+   INTERRUPT_DECLARATION();
+   DISABLE_INTERRUPTS();
+   
+   counter = 0;
+   for(i=0;i<MAXACTIVESLOTS;i++) {
+      if(schedule_vars.scheduleBuf[i].type == CELLTYPE_OFF){
+         counter++;
+      }
+   }
+   
+   ENABLE_INTERRUPTS();
+   
+   return counter;
+}
+
 //=== from IEEE802154E: reading the schedule and updating statistics
 
 void schedule_syncSlotOffset(slotOffset_t targetSlotOffset) {
@@ -545,7 +597,11 @@ void schedule_advanceSlot() {
    
    INTERRUPT_DECLARATION();
    DISABLE_INTERRUPTS();
-   
+   if (schedule_vars.currentScheduleEntry->slotOffset >= ((scheduleEntry_t*)schedule_vars.currentScheduleEntry->next)->slotOffset
+       ) {
+       // one slotframe has elapsed
+       sf0_notifyNewSlotframe();
+   }   
    schedule_vars.currentScheduleEntry = schedule_vars.currentScheduleEntry->next;
    
    ENABLE_INTERRUPTS();

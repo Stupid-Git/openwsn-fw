@@ -166,6 +166,7 @@ typedef struct {
    uint8_t*    routing_header[MAXNUM_RH3];
    uint8_t*    hopByhop_option;
    uint8_t     hop_limit;
+   uint8_t	   rhe_length;
    open_addr_t src;
    open_addr_t dest;
    uint8_t     header_length;          ///< Counter for internal use
@@ -249,6 +250,10 @@ owerror_t iphc_prependIPv6Header(
    open_addr_t*         value_dest,
    open_addr_t*         value_src,
    uint8_t              fw_SendOrfw_Rcv
+);
+uint8_t iphc_retrieveIPv6HopByHopHeader(
+   OpenQueueEntry_t*    msg,
+   rpl_option_ht*       rpl_option
 );
 
 /**
